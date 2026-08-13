@@ -10,6 +10,8 @@
 
 - [API 規格](docs/api-spec.md)：完整 request/response JSON、錯誤格式、狀態碼
 - [資料庫 Schema](docs/db-schema.md)：`Product`、`InventoryTransaction` 兩張表的完整欄位定義
+- [測試計畫](docs/test-plan.md)：三個測試情境的詳細步驟、預期結果、測試後觀察重點與判定標準，以及自動化測試腳本設計
+- [操作手冊](docs/operations.md)：啟動 API、跑三種測試、刪測試 schema 的實際指令
 
 ---
 

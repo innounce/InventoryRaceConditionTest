@@ -6,7 +6,7 @@
 
 - 每個情境開始前，先用 `POST /products` 建立一個**全新商品**（不要重複用同一個商品跑不同情境，避免互相污染），記錄回傳的 `id`、初始 `quantity`、`version`（應為 0）。
 - 測試 client 對每一個送出的請求都要記錄：送出時間、回應狀態碼、回應內容中的 `quantity` / `version`、耗時（latency）。這些資料是測完後分析用的原始素材。
-- 為了讓併發真的「同時」發生（而不是陸續送出），起跑時建議用 `Barrier` 或 `ManualResetEventSlim` 讓所有 Task 先卡在同一個點，倒數結束後同時放行，最大化 race window。若只是單純 `Task.WhenAll` 依序建立 Task，前面的請求可能已經跑完，較難重現真正的併發碰撞。
+- 為了讓併發真的「同時」發生（而不是陸續送出），起跑時要讓所有請求先卡在同一個點,倒數結束後同時放行,最大化 race window。若只是單純 `Task.WhenAll` 依序建立 Task,前面的請求可能已經跑完,較難重現真正的併發碰撞。**不要用 `Barrier`/`ManualResetEventSlim` 這種會阻塞執行緒的同步機制**——`Barrier.SignalAndWait()` 會佔住呼叫它的執行緒,幾百到上千個一起卡住等於同時跟執行緒集區要幾百到上千條執行緒,但 .NET 執行緒集區成長很慢(初始爆量後大約每 0.5 秒才增加 1 條),實際測起來「同時放行」會拖成幾十秒才全部放完,失去意義。改用不會佔住執行緒的非同步寫法:用一個共用的 `TaskCompletionSource` 當作「門」,每個請求先用 `Interlocked.Increment` 回報自己準備好了,最後一個到的請求把 `TaskCompletionSource` 設成完成,所有請求再一起 `await` 它——這樣等待期間不佔用任何執行緒,才能真正做到同時釋放。
 
 ## 共通分析方法（每個情境測完都要做）
 
@@ -30,7 +30,7 @@
 
 **測試步驟**：
 1. 準備 1000 個 `POST /products/{id}/stock-out`請求，每個 `quantity = 1`
-2. 併發度設定為 500～1000（用 `SemaphoreSlim` 或直接開滿），透過 Barrier 同時放行
+2. 併發度設定為 500～1000（用 `SemaphoreSlim` 或直接開滿），透過非同步門閂(見「共通測試環境準備」)同時放行
 3. 全部請求送完並收到回應後，暫停 1 秒（確保沒有還沒寫完的請求），再開始分析
 
 **預期結果（健康系統應有的結果）**：最終 `quantity = 0`，成功請求數 = 1000，`version` 最終值 = 1000。
@@ -52,7 +52,7 @@
 
 **測試步驟**：
 1. 準備 1000 個 `POST /products/{id}/stock-out` 請求，每個 `quantity = 1`（遠超過庫存量）
-2. 併發度設定為 500 以上，同樣用 Barrier 同時放行
+2. 併發度設定為 500 以上，同樣用非同步門閂同時放行
 3. 全部請求送完後分析
 
 **預期結果（健康系統應有的結果）**：只有前 100 次扣減成功，之後 900 次應收到 `400 INSUFFICIENT_STOCK`，最終 `quantity = 0`（不會是負數）。
@@ -74,7 +74,7 @@
 
 **測試步驟**：
 1. 啟動一段時間（例如 60 秒）的測試，期間持續發送請求：約 60% 為 `stock-out`（`quantity = 1~5` 隨機），40% 為 `stock-in`（`quantity = 1~5` 隨機）
-2. 併發度維持一個中等值（例如 100），全程持續發送，不使用 Barrier 一次性放行（因為這裡要模擬的是持續流量，不是單一瞬間爆量）
+2. 併發度維持一個中等值（例如 100），全程持續發送，不使用一次性放行的門閂（因為這裡要模擬的是持續流量，不是單一瞬間爆量）
 3. 過程中即時記錄每筆請求結果；`stock-out` 若遇到庫存不足回傳 400 屬正常情況，需與其他錯誤分開統計
 
 **預期結果（健康系統應有的結果）**：`Product.quantity` 應等於「初始庫存 + 所有成功 IN 的總和 - 所有成功 OUT 的總和」，且不會出現負數。
@@ -102,13 +102,21 @@
 ### 測試基礎設施
 
 - **API host**：用 `WebApplicationFactory<Program>` 讓 API 以 in-process 方式啟動，測試直接用它產生的 `HttpClient` 打請求，不用另外手動啟動一個 server。
-- **資料庫**：用 `Testcontainers.PostgreSql` 在每次測試執行時開一個一次性、乾淨的 Postgres 容器，測試結束自動銷毀。這樣每次跑都是全新環境、不受先前測試殘留資料影響，CI 上也不用額外準備固定的 Postgres 環境。
+- **資料庫：不用容器，直接用實體 PostgreSQL + 每次測試建立獨立 schema**。這裡刻意不用 `Testcontainers` 之類的容器方案——不是因為環境沒有 Docker，而是容器跑完就會被銷毀，連同這次測試「弄髒」出來的交易紀錄一起消失，之後沒辦法回頭人工複查、比對不同次測試的資料。人工複查正是這個練習重要的一環，所以資料庫必須是「跑完還在」的實體 DB，不是用完即丟的暫時容器：
+  - 測試開始前，用連線建立一個獨立的 schema，命名格式是「毫秒時間戳 + 隨機字串」,例如 `test_20260813153042123_a1b2c3d4e5f6...`。單靠毫秒時間戳不夠——xUnit 預設會平行執行不同測試類別,實測真的會有兩個測試在同一毫秒內起跑、schema 名稱撞名導致 `CREATE SCHEMA` 失敗,所以一定要加隨機字串保證不重複。`Product`、`InventoryTransaction` 兩張表照原本名稱建在這個 schema 裡。
+  - 測試連線把 `search_path` 設成該次的 schema，後續所有 SQL／EF Core mapping 完全不用改動——因為 mapping 認的是表名（`Product`），真正落在哪個 schema 是連線層級的設定，不是 entity mapping 的責任。
+  - **測完不砍**，直接保留在實體 DB 裡，事後想查資料就直接連進去看，不需要在測試跑到一半時暫停攔截。
+  - 副作用：因為不砍，資料會一直累積，建議之後定期手動清掉舊的測試 schema（例如只留最近幾次），避免本機硬碟被灌爆。
 - 每個測試方法（對應情境 A / B / C）在 Arrange 階段都建立一個全新商品，跟手動測試的「共通環境準備」原則一致，避免情境間互相污染。
+
+**Schema 跟 Table 差在哪**：PostgreSQL 的階層是 `Database → Schema → Table`。Schema 是 database 底下用來分組資料表的「資料夾」，同一個 database 可以有多個 schema，各自底下都能有一張叫 `Product` 的表而不衝突（完整名稱其實是 `schema名.table名`）。用 schema 隔離的好處是：表名維持原樣不用改，只要切換連線的 `search_path` 就好；如果改用「表名加時間戳」的方式（例如 `Product_20260813153042`），則每個 entity 都要動態改表名、EF Core mapping 要客製化，FK、query 都要記得帶上完整時間戳字串，容易出錯。
+
+**用 DB 工具查資料要不要一直連新的**：不用。用 schema 隔離的話，還是連同一個 database、同一組連線資訊，大部分 GUI 工具（DBeaver、pgAdmin、TablePlus、DataGrip 等）都會把 schema 顯示成同一條連線底下可以展開的資料夾清單，只要在同一條連線裡切換／展開不同的 schema 節點就能看到不同次測試的資料，不需要重新建立連線。（如果當初是用「每次建一個新 database」的方式，才需要切換連線目標——這也是 schema 方案比整個 database 方案對人工查資料更方便的原因。）
 
 ### 測試方法對應
 
 - 情境 A / B / C 各對應一個 xUnit `[Fact]`（或 `[Theory]` 搭配不同併發度、初始庫存做參數化）
-- Act 階段：用 `Task.WhenAll` + `SemaphoreSlim` / `Barrier` 發動併發請求，跟 [README](../README.md) 第 2 步 Client 的併發發送邏輯一致，測試裡可以直接複用同一套邏輯，不用重寫一份
+- Act 階段：用 `Task.WhenAll` + `SemaphoreSlim` / 非同步門閂發動併發請求，跟 [README](../README.md) 第 2 步 Client 的併發發送邏輯一致，測試裡可以直接複用同一套邏輯，不用重寫一份
 - Assert 階段：把本文件每個情境的「判定標準」直接轉成 assertion
 
 ### 斷言設計注意事項（跟一般 unit test 最大的不同）
@@ -117,7 +125,7 @@
 
 - **情境 A**：`Assert.True(finalQuantity > 0)`，而不是斷言等於某個精確值——因為每次跑，實際 lost update 發生的次數會不同。
 - **情境 B**：`Assert.True(finalQuantity < 0 || successCount > 100)`。
-- **情境 C**：對帳斷言反而可以精確——`Assert.Equal(expectedQuantity, actualQuantity)`，但這裡驗證的是「`Product.quantity` 有沒有跟自己的異動紀錄打架」，不是驗證業務邏輯正確性。
+- **情境 C**：`Assert.NotEqual(expectedQuantity, actualQuantity)`——跟 A、B 一樣是斷言「不健康的現象出現了」，只是這裡的不健康現象是「`Product.quantity` 跟自己的異動紀錄打架」，不是驗證業務邏輯正確性。
 
 因為這些測試在 baseline 版本的目的就是「要重現出髒資料」，所以在沒有任何鎖的版本上，**測試通過＝成功重現弄髒現象**（也就是說一開始這些測試"預期會抓到問題"，而不是預期全綠）。等之後加了鎖機制，把同一套測試的斷言方向反過來（例如情境 A 從 `finalQuantity > 0` 改成 `finalQuantity == 0`），就變成迴歸測試，用來確保鎖機制真的生效、以後改壞會被抓到——同一套測試骨架，baseline 階段用來證明問題存在，加鎖後用來防止問題復發。
 
@@ -133,11 +141,11 @@
 
 **照抄不用改的部分**：
 
-- 情境 A / B / C 的環境準備（建立全新商品）、併發發送邏輯（Barrier + `SemaphoreSlim` 同時放行）
+- 情境 A / B / C 的環境準備（建立全新商品）、併發發送邏輯（非同步門閂 + `SemaphoreSlim` 同時放行）
 - 共通分析方法：對帳、`balanceAfter` 序列檢查、throughput / latency 記錄
-- `Inventory.ConcurrencyTests` 測試專案架構（`WebApplicationFactory` + `Testcontainers.PostgreSql`）
+- `Inventory.ConcurrencyTests` 測試專案架構（`WebApplicationFactory` + 實體 DB、每次測試建立獨立 schema）
 
-**每個分支一定要改的部分**：Assertion 方向反過來。天真版是「斷言弄髒了才算通過」，用來證明問題存在；修正分支要改成「斷言沒弄髒才算通過」——情境 A 從 `Assert.True(finalQuantity > 0)` 改成 `Assert.Equal(0, finalQuantity)`；情境 B 從 `finalQuantity < 0 || successCount > 100` 改成 `Assert.Equal(0, finalQuantity)` 且 `successCount == 100`；情境 C 的對帳斷言維持不變（對帳本來就該一直成立，天真版只是剛好也常常失敗）。
+**每個分支一定要改的部分**：Assertion 方向反過來。天真版是「斷言弄髒了才算通過」，用來證明問題存在；修正分支要改成「斷言沒弄髒才算通過」——情境 A 從 `Assert.True(finalQuantity > 0)` 改成 `Assert.Equal(0, finalQuantity)`；情境 B 從 `finalQuantity < 0 || successCount > 100` 改成 `Assert.Equal(0, finalQuantity)` 且 `successCount == 100`；情境 C 從「斷言對帳不一致」改成「斷言對帳一致」（`Assert.Equal(expectedQuantity, actualQuantity)`）。三個情境的斷言方向都要反過來——lost update 天生就會讓 `Product.Quantity` 跟 `InventoryTransaction` 總和對不上（交易紀錄誠實記下了異動,但實際庫存值可能被併發覆蓋掉），所以情境 C 的對帳在 baseline 上也會失敗，不是特例。
 
 **視機制額外補充的部分**（不是每個分支都一樣，依機制特性加）：
 
