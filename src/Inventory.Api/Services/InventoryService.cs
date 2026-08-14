@@ -16,7 +16,7 @@ public class InventoryService(
     private static readonly TimeSpan LockExpiry = TimeSpan.FromSeconds(10);
     // Lock wait timeout: callers poll Redis up to this duration before giving up.
     // Keeps DB connections free during contention — only held after lock is acquired.
-    private static readonly TimeSpan LockTimeout = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan LockTimeout = TimeSpan.FromSeconds(5);
 
     public async Task<StockChangeResponse> StockInAsync(Guid productId, StockChangeRequest request)
     {
