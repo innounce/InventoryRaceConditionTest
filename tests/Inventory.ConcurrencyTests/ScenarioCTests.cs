@@ -7,11 +7,8 @@ namespace Inventory.ConcurrencyTests;
 // 50——時間拉長不會改變這條斷言驗證的東西(對帳是否一致),只是讓重現機率更高,
 // 縮短是刻意的取捨,不是規格變動。
 //
-// Baseline 階段的斷言方向跟情境 A/B 一致:斷言對帳「不一致」才算通過,因為
-// lost update 天生就會讓 Product.Quantity 跟 InventoryTransaction 記錄的總和對不
-// 上——每筆交易紀錄都誠實記下了「這次異動了多少」,但實際庫存值可能被併發的另一
-// 個請求覆蓋掉,所以兩者必然對不上。等第 3 步做完某種鎖機制後,斷言要反過來(改
-// 成斷言對帳「一致」)。
+// feature/queue-based-serialization 分支:斷言方向反轉——單一 consumer 序列化所有
+// 寫入，Product.Quantity 必須與 InventoryTransaction 記錄的總和完全吻合。
 [Trait("Category", "Concurrency")]
 public class ScenarioCTests
 {
@@ -20,7 +17,7 @@ public class ScenarioCTests
     private const int Concurrency = 50;
 
     [Fact]
-    public async Task MixedStockInOut_UnderSustainedLoad_ReproducesReconciliationMismatch()
+    public async Task MixedStockInOut_UnderSustainedLoad_ReconciliationMatches()
     {
         var (factory, schemaName) = await TestSchema.CreateAsync();
         await using var _ = factory;
@@ -44,10 +41,10 @@ public class ScenarioCTests
         CsvExport.Write("C", schemaName, finalProduct, transactions);
 
         var expectedQuantity = InitialQuantity + transactions.Sum(SignedQuantity);
-        var isDirty = expectedQuantity != finalProduct.Quantity;
+        var isClean = expectedQuantity == finalProduct.Quantity;
 
-        Assert.True(isDirty,
-            $"預期在沒有併發控制的 baseline 上重現對帳不一致,但沒有偵測到。"
+        Assert.True(isClean,
+            $"Queue 序列化應確保對帳一致,但偵測到不符。"
             + $"初始庫存 {InitialQuantity} ± 交易紀錄總和 = {expectedQuantity},目前 Quantity = {finalProduct.Quantity}。"
             + $"schema={schemaName}, transactionCount={transactions.Count}");
     }

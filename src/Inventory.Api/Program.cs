@@ -1,5 +1,6 @@
 using Inventory.Api.Data;
 using Inventory.Api.Middleware;
+using Inventory.Api.Queue;
 using Inventory.Api.Repositories;
 using Inventory.Api.Services;
 using Microsoft.EntityFrameworkCore;
@@ -16,7 +17,13 @@ builder.Services.AddDbContext<InventoryDbContext>(options =>
 builder.Services.AddScoped<IProductRepository, ProductRepository>();
 builder.Services.AddScoped<IInventoryTransactionRepository, InventoryTransactionRepository>();
 builder.Services.AddScoped<IProductService, ProductService>();
-builder.Services.AddScoped<IInventoryService, InventoryService>();
+
+// Queue-based serialization: InventoryService is the real processor (resolved by worker);
+// QueuedInventoryService is the IInventoryService the controller sees.
+builder.Services.AddScoped<InventoryService>();
+builder.Services.AddSingleton<InventoryChannel>();
+builder.Services.AddHostedService<InventoryQueueWorker>();
+builder.Services.AddScoped<IInventoryService, QueuedInventoryService>();
 
 var app = builder.Build();
 
