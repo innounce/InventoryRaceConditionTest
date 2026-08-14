@@ -14,6 +14,9 @@ public class InventoryService(
     // Lock expiry: long enough to survive a slow DB write, short enough to
     // self-heal if the process crashes before releasing.
     private static readonly TimeSpan LockExpiry = TimeSpan.FromSeconds(10);
+    // Lock wait timeout: callers poll Redis up to this duration before giving up.
+    // Keeps DB connections free during contention — only held after lock is acquired.
+    private static readonly TimeSpan LockTimeout = TimeSpan.FromMilliseconds(500);
 
     public async Task<StockChangeResponse> StockInAsync(Guid productId, StockChangeRequest request)
     {
@@ -59,7 +62,7 @@ public class InventoryService(
     private async Task<IDistributedLock> AcquireLockAsync(Guid productId)
     {
         var key = $"inventory:lock:{productId}";
-        var lock_ = await lockFactory.TryAcquireAsync(key, LockExpiry);
+        var lock_ = await lockFactory.TryAcquireAsync(key, LockExpiry, LockTimeout);
         return lock_ ?? throw new LockAcquisitionFailedException(productId);
     }
 
