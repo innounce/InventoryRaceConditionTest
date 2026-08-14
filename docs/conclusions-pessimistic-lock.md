@@ -24,10 +24,40 @@
 - 失敗只有兩種：庫存不足（400，業務邏輯正確）或連線錯誤（500，環境問題）
 - 不存在「操作衝突請重試」的情況，伺服器自行在 DB 層序列化
 
-## 結論四：代價是延遲與 lock queue 風險
-- 每筆請求持有 row-level exclusive lock 直到 transaction commit，其他請求在 DB 等待
-- 高並發下每筆請求的 P99 延遲會上升（因為等待鎖）
-- 極端負載下 lock queue 可能積壓，引發 statement timeout 或連線耗盡
+## 結論四：高並發下連線池與無關請求會受牽連
+等鎖期間 DB 連線持續被佔住，三個因素形成惡性循環：
+
+```
+request 量增加
+    ↓
+等鎖時間拉長（lock queue 積壓）
+    ↓
+每筆請求持有連線的時間增加
+    ↓
+連線池更快被耗盡
+    ↓
+無關的 GET /products 等查詢也拿不到連線 → 500
+    ↓
+整體 API 響應惡化，用戶重試，request 量更大
+    ↓
+惡化加劇
+```
+
+調高連線池上限無法根本解決問題，只是延後發生——DB 本身的 `max_connections` 終究是天花板。
+
+## 結論五：多 server 部署的相容性
+
+`SELECT ... FOR UPDATE` 的鎖存在於 PostgreSQL，所有 API 實例共用，天然支援多 server 部署。
+
+若改用應用層鎖，相容性因實作方式而異：
+
+| 做法 | 多 server 有效？ |
+|---|---|
+| DB 層 FOR UPDATE（本分支） | ✅ 有效，鎖在 DB，所有 server 共用 |
+| 應用層 in-memory（SemaphoreSlim 等） | ❌ 無效，鎖只活在單一 process，其他 server 不知道 |
+| 應用層 Redis distributed lock | ✅ 有效，鎖在 Redis，所有 server 共用 |
+
+in-memory lock 在單一 server 上完全正確，但只要水平擴展到多台，race condition 立刻復活——每台 server 的記憶體獨立，彼此之間沒有協調。
 
 ## 總結
-悲觀鎖把「並發衝突」從應用層（409 → 客戶端 retry）下沉到 DB 層（row lock → 排隊等待），正確性與吞吐量都優於樂觀鎖，代價是每筆請求的平均延遲提高。適合高衝突、不能丟單的場景；若延遲敏感或鎖等待時間難以預測，則需考慮 queue-based serialization。
+悲觀鎖把「並發衝突」從應用層（409 → 客戶端 retry）下沉到 DB 層（row lock → 排隊等待），正確性與吞吐量都優於樂觀鎖，多 server 部署也天然支援。核心代價是：等鎖期間 DB 連線被綁住，高並發下連線池會成為全站瓶頸，讓原本無關的請求一起受害。
