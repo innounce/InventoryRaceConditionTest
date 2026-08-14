@@ -1,9 +1,10 @@
 namespace Inventory.ConcurrencyTests;
 
 // docs/test-plan.md 情境 A:Lost Update 驗證。
-// Baseline 階段的斷言方向是「斷言弄髒了才算通過」——這裡驗證的是 API 目前
-// 還沒有任何併發控制,所以理論上應該要重現 lost update。等第 3 步做完某種鎖
-// 機制後,同一套測試骨架的斷言方向要反過來(見 docs/test-plan.md「跨分支重複使用測試」)。
+// feature/optimistic-lock 分支:Version 作為 EF Core ConcurrencyToken，
+// SaveChanges 產生 AND "Version"=@old WHERE 子句，並發寫入者得到
+// DbUpdateConcurrencyException → HTTP 409，不寫入任何資料。
+// 斷言方向與 master baseline 相反:成功的請求必須精確對帳。
 [Trait("Category", "Concurrency")]
 public class ScenarioATests
 {
@@ -11,7 +12,7 @@ public class ScenarioATests
     private const int RequestCount = 1000;
 
     [Fact]
-    public async Task StockOut_UnderHighConcurrency_ReproducesLostUpdate()
+    public async Task StockOut_UnderHighConcurrency_NoLostUpdate()
     {
         var (factory, schemaName) = await TestSchema.CreateAsync();
         await using var _ = factory;
@@ -29,13 +30,19 @@ public class ScenarioATests
         CsvExport.Write("A", schemaName, finalProduct, transactions);
         var hasDuplicateBalance = transactions.GroupBy(t => t.BalanceAfter).Any(g => g.Count() > 1);
 
-        var isDirty = finalProduct.Quantity != 0
-            || finalProduct.Version < successCount
-            || hasDuplicateBalance;
+        // 樂觀鎖下每筆成功的請求都精確遞減庫存一次：
+        //   - Quantity == InitialQuantity - successCount（精確對帳，無 lost update）
+        //   - Version == successCount（每次成功 +1，409 的請求不寫入）
+        //   - BalanceAfter 無重複（每筆看到的都是不同版本的庫存）
+        var isClean = finalProduct.Quantity == InitialQuantity - successCount
+            && finalProduct.Version == successCount
+            && !hasDuplicateBalance;
 
-        Assert.True(isDirty,
-            $"預期在沒有併發控制的 baseline 上重現 lost update,但沒有偵測到。"
-            + $"schema={schemaName}, finalQuantity={finalProduct.Quantity}, version={finalProduct.Version}, "
-            + $"successCount={successCount}, transactionCount={transactions.Count}, hasDuplicateBalance={hasDuplicateBalance}");
+        Assert.True(isClean,
+            $"樂觀鎖應確保每筆成功的請求都精確更新庫存，但偵測到不一致。"
+            + $"schema={schemaName}, finalQuantity={finalProduct.Quantity}, "
+            + $"expectedQuantity={InitialQuantity - successCount}, "
+            + $"version={finalProduct.Version}, successCount={successCount}, "
+            + $"transactionCount={transactions.Count}, hasDuplicateBalance={hasDuplicateBalance}");
     }
 }

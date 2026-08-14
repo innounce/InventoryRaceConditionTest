@@ -18,11 +18,11 @@ public class InventoryDbContext(DbContextOptions<InventoryDbContext> options) : 
             entity.Property(p => p.Sku).HasMaxLength(50).IsRequired();
             entity.HasIndex(p => p.Sku).IsUnique();
             entity.Property(p => p.Name).HasMaxLength(200).IsRequired();
-            // Version is a plain counter the application increments manually on every
-            // stock-in/out — it must never become an EF Core concurrency token, or EF
-            // would silently add optimistic-locking WHERE clauses and defeat the point
-            // of this baseline (see docs/db-schema.md).
-            entity.Property(p => p.Version).HasDefaultValue(0);
+            // Version is the optimistic-lock token. EF Core will append
+            // AND "Version" = @old_version to every UPDATE, so concurrent writers
+            // that read the same version will get DbUpdateConcurrencyException
+            // (0 rows affected) and be converted to HTTP 409 by the service layer.
+            entity.Property(p => p.Version).HasDefaultValue(0).IsConcurrencyToken();
         });
 
         modelBuilder.Entity<InventoryTransaction>(entity =>

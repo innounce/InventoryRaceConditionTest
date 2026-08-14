@@ -2,6 +2,7 @@ using Inventory.Api.Dtos;
 using Inventory.Api.Exceptions;
 using Inventory.Api.Models;
 using Inventory.Api.Repositories;
+using Microsoft.EntityFrameworkCore;
 
 namespace Inventory.Api.Services;
 
@@ -9,10 +10,6 @@ public class InventoryService(
     IProductRepository productRepository,
     IInventoryTransactionRepository transactionRepository) : IInventoryService
 {
-    // Deliberately naive read-modify-write: no SELECT ... FOR UPDATE, no explicit
-    // isolation level change, no retry. This is the baseline described in
-    // docs/db-schema.md and README.md — the race condition is the point, not a bug
-    // to be fixed here. Do not add locking to this method.
     public async Task<StockChangeResponse> StockInAsync(Guid productId, StockChangeRequest request)
     {
         if (request.Quantity <= 0)
@@ -64,7 +61,17 @@ public class InventoryService(
             CreatedAt = product.UpdatedAt
         };
         await transactionRepository.AddAsync(transaction);
-        await productRepository.SaveChangesAsync();
+
+        try
+        {
+            await productRepository.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // EF generated: UPDATE "Product" ... WHERE "Id"=@id AND "Version"=@old
+            // 0 rows affected means another request already incremented Version.
+            throw new OptimisticConcurrencyException();
+        }
 
         var productDto = new ProductDto(
             product.Id, product.Sku, product.Name, product.Quantity,
