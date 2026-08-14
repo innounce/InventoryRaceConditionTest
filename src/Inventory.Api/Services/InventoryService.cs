@@ -9,20 +9,21 @@ public class InventoryService(
     IProductRepository productRepository,
     IInventoryTransactionRepository transactionRepository) : IInventoryService
 {
-    // Deliberately naive read-modify-write: no SELECT ... FOR UPDATE, no explicit
-    // isolation level change, no retry. This is the baseline described in
-    // docs/db-schema.md and README.md — the race condition is the point, not a bug
-    // to be fixed here. Do not add locking to this method.
     public async Task<StockChangeResponse> StockInAsync(Guid productId, StockChangeRequest request)
     {
         if (request.Quantity <= 0)
             throw new InvalidQuantityException();
 
-        var product = await productRepository.GetByIdAsync(productId)
+        await using var tx = await productRepository.BeginTransactionAsync();
+
+        var product = await productRepository.GetByIdForUpdateAsync(productId)
             ?? throw new ProductNotFoundException(productId);
 
         product.Quantity += request.Quantity;
-        return await ApplyChangeAsync(product, ChangeType.In, request.Quantity);
+        var result = await ApplyChangeAsync(product, ChangeType.In, request.Quantity);
+
+        await tx.CommitAsync();
+        return result;
     }
 
     public async Task<StockChangeResponse> StockOutAsync(Guid productId, StockChangeRequest request)
@@ -30,7 +31,9 @@ public class InventoryService(
         if (request.Quantity <= 0)
             throw new InvalidQuantityException();
 
-        var product = await productRepository.GetByIdAsync(productId)
+        await using var tx = await productRepository.BeginTransactionAsync();
+
+        var product = await productRepository.GetByIdForUpdateAsync(productId)
             ?? throw new ProductNotFoundException(productId);
 
         var newQuantity = product.Quantity - request.Quantity;
@@ -38,7 +41,10 @@ public class InventoryService(
             throw new InsufficientStockException(product.Quantity, request.Quantity);
 
         product.Quantity = newQuantity;
-        return await ApplyChangeAsync(product, ChangeType.Out, request.Quantity);
+        var result = await ApplyChangeAsync(product, ChangeType.Out, request.Quantity);
+
+        await tx.CommitAsync();
+        return result;
     }
 
     public async Task<List<TransactionDto>> GetTransactionsAsync(Guid productId)
