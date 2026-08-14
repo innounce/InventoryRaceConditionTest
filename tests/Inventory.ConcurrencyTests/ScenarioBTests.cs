@@ -1,7 +1,8 @@
 namespace Inventory.ConcurrencyTests;
 
-// docs/test-plan.md 情境 B:負庫存驗證。同樣是 baseline 階段,斷言方向是
-// 「斷言弄髒了才算通過」。
+// docs/test-plan.md 情境 B:負庫存驗證。
+// feature/distributed-lock 分支:斷言方向反轉——Redis 分散式鎖保護讀-改-寫,
+// 庫存絕不應低於 0,且成功扣庫數不超過初始庫存。
 [Trait("Category", "Concurrency")]
 public class ScenarioBTests
 {
@@ -9,7 +10,7 @@ public class ScenarioBTests
     private const int RequestCount = 1000;
 
     [Fact]
-    public async Task StockOut_ExceedingInitialQuantity_ReproducesNegativeStock()
+    public async Task StockOut_ExceedingInitialQuantity_NoNegativeStock()
     {
         var (factory, schemaName) = await TestSchema.CreateAsync();
         await using var _ = factory;
@@ -26,11 +27,12 @@ public class ScenarioBTests
         var transactions = await client.GetTransactionsAsync(product.Id);
         CsvExport.Write("B", schemaName, finalProduct, transactions);
 
-        var isDirty = finalProduct.Quantity < 0 || successCount > InitialQuantity;
+        var isClean = finalProduct.Quantity >= 0 && successCount <= InitialQuantity
+            && finalProduct.Quantity == InitialQuantity - successCount;
 
-        Assert.True(isDirty,
-            $"預期在沒有併發控制的 baseline 上重現「庫存不可為負數」規則失守,但沒有偵測到。"
+        Assert.True(isClean,
+            $"Redis 分散式鎖應防止負庫存,但偵測到資料不一致。"
             + $"schema={schemaName}, finalQuantity={finalProduct.Quantity}, successCount={successCount}, "
-            + $"initialQuantity={InitialQuantity}");
+            + $"initialQuantity={InitialQuantity}, expectedQuantity={InitialQuantity - successCount}");
     }
 }

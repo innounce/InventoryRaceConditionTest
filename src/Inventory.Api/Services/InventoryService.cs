@@ -1,5 +1,6 @@
 using Inventory.Api.Dtos;
 using Inventory.Api.Exceptions;
+using Inventory.Api.Locking;
 using Inventory.Api.Models;
 using Inventory.Api.Repositories;
 
@@ -7,16 +8,19 @@ namespace Inventory.Api.Services;
 
 public class InventoryService(
     IProductRepository productRepository,
-    IInventoryTransactionRepository transactionRepository) : IInventoryService
+    IInventoryTransactionRepository transactionRepository,
+    IDistributedLockFactory lockFactory) : IInventoryService
 {
-    // Deliberately naive read-modify-write: no SELECT ... FOR UPDATE, no explicit
-    // isolation level change, no retry. This is the baseline described in
-    // docs/db-schema.md and README.md — the race condition is the point, not a bug
-    // to be fixed here. Do not add locking to this method.
+    // Lock expiry: long enough to survive a slow DB write, short enough to
+    // self-heal if the process crashes before releasing.
+    private static readonly TimeSpan LockExpiry = TimeSpan.FromSeconds(10);
+
     public async Task<StockChangeResponse> StockInAsync(Guid productId, StockChangeRequest request)
     {
         if (request.Quantity <= 0)
             throw new InvalidQuantityException();
+
+        await using var lock_ = await AcquireLockAsync(productId);
 
         var product = await productRepository.GetByIdAsync(productId)
             ?? throw new ProductNotFoundException(productId);
@@ -29,6 +33,8 @@ public class InventoryService(
     {
         if (request.Quantity <= 0)
             throw new InvalidQuantityException();
+
+        await using var lock_ = await AcquireLockAsync(productId);
 
         var product = await productRepository.GetByIdAsync(productId)
             ?? throw new ProductNotFoundException(productId);
@@ -48,6 +54,13 @@ public class InventoryService(
 
         var transactions = await transactionRepository.GetByProductIdAsync(productId);
         return transactions.Select(ToDto).ToList();
+    }
+
+    private async Task<IDistributedLock> AcquireLockAsync(Guid productId)
+    {
+        var key = $"inventory:lock:{productId}";
+        var lock_ = await lockFactory.TryAcquireAsync(key, LockExpiry);
+        return lock_ ?? throw new LockAcquisitionFailedException(productId);
     }
 
     private async Task<StockChangeResponse> ApplyChangeAsync(Product product, ChangeType changeType, int quantity)
