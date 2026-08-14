@@ -1,7 +1,9 @@
+using System.Data;
 using Inventory.Api.Dtos;
 using Inventory.Api.Exceptions;
 using Inventory.Api.Models;
 using Inventory.Api.Repositories;
+using Npgsql;
 
 namespace Inventory.Api.Services;
 
@@ -9,20 +11,27 @@ public class InventoryService(
     IProductRepository productRepository,
     IInventoryTransactionRepository transactionRepository) : IInventoryService
 {
-    // Deliberately naive read-modify-write: no SELECT ... FOR UPDATE, no explicit
-    // isolation level change, no retry. This is the baseline described in
-    // docs/db-schema.md and README.md — the race condition is the point, not a bug
-    // to be fixed here. Do not add locking to this method.
     public async Task<StockChangeResponse> StockInAsync(Guid productId, StockChangeRequest request)
     {
         if (request.Quantity <= 0)
             throw new InvalidQuantityException();
 
-        var product = await productRepository.GetByIdAsync(productId)
-            ?? throw new ProductNotFoundException(productId);
+        await using var tx = await productRepository.BeginTransactionAsync(IsolationLevel.Serializable);
 
-        product.Quantity += request.Quantity;
-        return await ApplyChangeAsync(product, ChangeType.In, request.Quantity);
+        try
+        {
+            var product = await productRepository.GetByIdAsync(productId)
+                ?? throw new ProductNotFoundException(productId);
+
+            product.Quantity += request.Quantity;
+            var result = await ApplyChangeAsync(product, ChangeType.In, request.Quantity);
+            await tx.CommitAsync();
+            return result;
+        }
+        catch (Exception ex) when (IsSerializationFailure(ex))
+        {
+            throw new SerializationFailureException();
+        }
     }
 
     public async Task<StockChangeResponse> StockOutAsync(Guid productId, StockChangeRequest request)
@@ -30,15 +39,26 @@ public class InventoryService(
         if (request.Quantity <= 0)
             throw new InvalidQuantityException();
 
-        var product = await productRepository.GetByIdAsync(productId)
-            ?? throw new ProductNotFoundException(productId);
+        await using var tx = await productRepository.BeginTransactionAsync(IsolationLevel.Serializable);
 
-        var newQuantity = product.Quantity - request.Quantity;
-        if (newQuantity < 0)
-            throw new InsufficientStockException(product.Quantity, request.Quantity);
+        try
+        {
+            var product = await productRepository.GetByIdAsync(productId)
+                ?? throw new ProductNotFoundException(productId);
 
-        product.Quantity = newQuantity;
-        return await ApplyChangeAsync(product, ChangeType.Out, request.Quantity);
+            var newQuantity = product.Quantity - request.Quantity;
+            if (newQuantity < 0)
+                throw new InsufficientStockException(product.Quantity, request.Quantity);
+
+            product.Quantity = newQuantity;
+            var result = await ApplyChangeAsync(product, ChangeType.Out, request.Quantity);
+            await tx.CommitAsync();
+            return result;
+        }
+        catch (Exception ex) when (IsSerializationFailure(ex))
+        {
+            throw new SerializationFailureException();
+        }
     }
 
     public async Task<List<TransactionDto>> GetTransactionsAsync(Guid productId)
@@ -48,6 +68,21 @@ public class InventoryService(
 
         var transactions = await transactionRepository.GetByProductIdAsync(productId);
         return transactions.Select(ToDto).ToList();
+    }
+
+    // PostgreSQL SSI aborts conflicting transactions with SQLSTATE 40001.
+    // Npgsql's execution strategy wraps it: PostgresException → DbUpdateException
+    // → InvalidOperationException, so we walk the full InnerException chain.
+    private static bool IsSerializationFailure(Exception ex)
+    {
+        var current = (Exception?)ex;
+        while (current is not null)
+        {
+            if (current is PostgresException pg && pg.SqlState == "40001")
+                return true;
+            current = current.InnerException;
+        }
+        return false;
     }
 
     private async Task<StockChangeResponse> ApplyChangeAsync(Product product, ChangeType changeType, int quantity)

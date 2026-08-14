@@ -1,6 +1,8 @@
+using System.Data;
 using Inventory.Api.Data;
 using Inventory.Api.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace Inventory.Api.Repositories;
 
@@ -11,6 +13,9 @@ public class ProductRepository(InventoryDbContext dbContext) : IProductRepositor
 
     public Task<Product?> GetByIdAsync(Guid id) =>
         dbContext.Products.FirstOrDefaultAsync(p => p.Id == id);
+
+    public Task<IDbContextTransaction> BeginTransactionAsync(IsolationLevel isolationLevel) =>
+        dbContext.Database.BeginTransactionAsync(isolationLevel);
 
     public async Task AddAsync(Product product) =>
         await dbContext.Products.AddAsync(product);

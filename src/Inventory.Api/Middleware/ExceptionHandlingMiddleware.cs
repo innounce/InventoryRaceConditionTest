@@ -20,6 +20,7 @@ public class ExceptionHandlingMiddleware(RequestDelegate next)
                 ProductNotFoundException e => (HttpStatusCode.NotFound, e.ErrorCode, e.Message),
                 InsufficientStockException e => (HttpStatusCode.BadRequest, e.ErrorCode, e.Message),
                 InvalidQuantityException e => (HttpStatusCode.BadRequest, e.ErrorCode, e.Message),
+                SerializationFailureException e => (HttpStatusCode.Conflict, e.ErrorCode, e.Message),
                 _ => (HttpStatusCode.InternalServerError, "INTERNAL_ERROR", "系統發生未預期的錯誤")
             };
 
