@@ -44,18 +44,23 @@ dotnet run --project src/Inventory.Api --urls http://localhost:5279
 ### 手動:Inventory.LoadTestClient
 
 ```bash
+# 建議:依序跑完三個情境,確認前一個完全結束才開始下一個,避免互搶連線
+dotnet run --project src/Inventory.LoadTestClient -- --scenario ALL --base-url http://localhost:5279
+
+# 也可以只跑單一情境
 dotnet run --project src/Inventory.LoadTestClient -- --scenario A --base-url http://localhost:5279
 dotnet run --project src/Inventory.LoadTestClient -- --scenario B --base-url http://localhost:5279
 dotnet run --project src/Inventory.LoadTestClient -- --scenario C --base-url http://localhost:5279
 ```
 
-- 情境 A、B 是瞬間爆量,幾秒內結束
-- 情境 C 會連續跑 60 秒,指令不會馬上回來
+- `--scenario ALL` 內部是單一 `await` 鏈依序執行 A → B → C,不是同時發動,每個情境(含寫 CSV)都完全結束才會開始下一個
+- 情境 A、B 是瞬間爆量,幾秒內結束;情境 C 會連續跑 60 秒,指令不會馬上回來,`ALL` 模式跑完三個大約要 70 秒以上
 
 ### 自動化:Inventory.ConcurrencyTests
 
 ```bash
-# 三個情境一次跑完
+# 三個情境一次跑完,固定依 A → B → C 順序執行(見 TestCollectionOrderer.cs),
+# 且已停用跨測試類別的平行執行,不會互搶連線
 dotnet test tests/Inventory.ConcurrencyTests
 
 # 只跑其中一個情境
@@ -68,6 +73,17 @@ dotnet test tests/Inventory.ConcurrencyTests --logger "console;verbosity=detaile
 ```
 
 這個測試專案**不需要**先手動啟動 API——`WebApplicationFactory` 會自己用 in-process 方式啟動一份。但 PostgreSQL 本身要有在跑(見前置準備)。
+
+> 不要同時手動跑 `Inventory.LoadTestClient` 又跑 `dotnet test`——兩邊各自有自己的 Npgsql 連線池,同時打會一起逼近 PostgreSQL 的 `max_connections`。一次只跑一種。
+
+### 報告存放位置
+
+終端機印出的是給人看的即時摘要,兩種跑法**跑完都會另外在 repo 根目錄的 `reports/` 資料夾寫一份 CSV**(這個資料夾已加進 `.gitignore`,不會被 commit),資料夾名稱都以情境代號(`A`/`B`/`C`)開頭:
+
+- `Inventory.LoadTestClient`:`reports/<A|B|C>-<時間戳>/product.csv`、`transactions.csv`
+- `Inventory.ConcurrencyTests`:`reports/<A|B|C>-<schema 名稱>/product.csv`、`transactions.csv`(schema 名稱部分跟該次測試留下的 schema 同名,方便對照)
+
+`product.csv` 是那次測試最後的商品狀態(一行),`transactions.csv` 是完整的異動紀錄,可以直接拿 Excel/Numbers 開,或用 `wc -l`、`awk` 之類的指令分析。EF Core 逐筆 SQL 指令的 log 預設已經關掉(見 `appsettings.json` 的 `Microsoft.EntityFrameworkCore: Warning`),不會再洗版。
 
 ## 3. 刪除測試 schema
 

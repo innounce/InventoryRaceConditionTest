@@ -41,6 +41,7 @@ public class ScenarioCTests
 
         var finalProduct = await client.GetProductAsync(product.Id);
         var transactions = await client.GetTransactionsAsync(product.Id);
+        CsvExport.Write("C", schemaName, finalProduct, transactions);
 
         var expectedQuantity = InitialQuantity + transactions.Sum(SignedQuantity);
         var isDirty = expectedQuantity != finalProduct.Quantity;

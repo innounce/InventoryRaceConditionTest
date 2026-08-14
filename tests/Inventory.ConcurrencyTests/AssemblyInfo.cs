@@ -6,3 +6,8 @@ using Xunit;
 // scenario's own numbers unreliable, since they'd be contending for the same
 // PostgreSQL instance's connection slots and CPU at once.
 [assembly: CollectionBehavior(DisableTestParallelization = true)]
+
+// Pins execution order to A → B → C — see TestCollectionOrderer.cs for why
+// DisableTestParallelization alone isn't enough to guarantee that.
+[assembly: TestCollectionOrderer(
+    "Inventory.ConcurrencyTests.AlphabeticalTestCollectionOrderer", "Inventory.ConcurrencyTests")]

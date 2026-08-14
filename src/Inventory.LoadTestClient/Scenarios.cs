@@ -57,5 +57,8 @@ public static class Scenarios
         var finalProduct = await client.GetProductAsync(productId);
         var transactions = await client.GetTransactionsAsync(productId);
         ScenarioReport.Print(scenarioName, initialQuantity, results, finalProduct, transactions);
+
+        var reportDir = CsvReportWriter.Write(scenarioName, finalProduct, transactions);
+        Console.WriteLine($"CSV 報告已輸出到:{reportDir}");
     }
 }

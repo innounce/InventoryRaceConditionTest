@@ -23,6 +23,8 @@ public class ScenarioBTests
         var successCount = responses.Count(r => r.IsSuccessStatusCode);
 
         var finalProduct = await client.GetProductAsync(product.Id);
+        var transactions = await client.GetTransactionsAsync(product.Id);
+        CsvExport.Write("B", schemaName, finalProduct, transactions);
 
         var isDirty = finalProduct.Quantity < 0 || successCount > InitialQuantity;
 

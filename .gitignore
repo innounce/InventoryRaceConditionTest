@@ -7,5 +7,6 @@ obj/
 *.swp
 appsettings.*.json.bak
 TestResults/
+reports/
 .DS_Store
 Thumbs.db

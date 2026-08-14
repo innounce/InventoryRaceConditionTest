@@ -26,6 +26,7 @@ public class ScenarioATests
 
         var finalProduct = await client.GetProductAsync(product.Id);
         var transactions = await client.GetTransactionsAsync(product.Id);
+        CsvExport.Write("A", schemaName, finalProduct, transactions);
         var hasDuplicateBalance = transactions.GroupBy(t => t.BalanceAfter).Any(g => g.Count() > 1);
 
         var isDirty = finalProduct.Quantity != 0
