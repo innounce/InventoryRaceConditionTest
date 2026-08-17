@@ -25,17 +25,18 @@ public class ScenarioCTests
         var product = await client.CreateProductAsync($"CT-C-{DateTime.UtcNow:HHmmssfff}", "情境 C 測試商品", InitialQuantity);
 
         var random = new Random();
-        await ConcurrentBurst.RunSustainedAsync(Duration, Concurrency, () =>
+        var results = await ConcurrentBurst.RunSustainedAsync(Duration, Concurrency, () =>
         {
             var quantity = random.Next(1, 6);
             return random.NextDouble() < 0.6
                 ? client.StockOutAsync(product.Id, quantity)
                 : client.StockInAsync(product.Id, quantity);
         });
+        var requestStats = results.Select(r => (r.Value.IsSuccessStatusCode, r.Elapsed)).ToList();
 
         var finalProduct = await client.GetProductAsync(product.Id);
         var transactions = await client.GetTransactionsAsync(product.Id);
-        CsvExport.Write("C", schemaName, finalProduct, transactions);
+        CsvExport.Write("C", schemaName, finalProduct, transactions, requestStats);
 
         var expectedQuantity = InitialQuantity + transactions.Sum(SignedQuantity);
         var isClean = expectedQuantity == finalProduct.Quantity;

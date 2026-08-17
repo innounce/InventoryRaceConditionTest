@@ -20,12 +20,13 @@ public class ScenarioBTests
 
         var product = await client.CreateProductAsync($"CT-B-{DateTime.UtcNow:HHmmssfff}", "情境 B 測試商品", InitialQuantity);
 
-        var responses = await ConcurrentBurst.RunAsync(RequestCount, _ => client.StockOutAsync(product.Id, 1));
-        var successCount = responses.Count(r => r.IsSuccessStatusCode);
+        var results = await ConcurrentBurst.RunAsync(RequestCount, _ => client.StockOutAsync(product.Id, 1));
+        var successCount = results.Count(r => r.Value.IsSuccessStatusCode);
+        var requestStats = results.Select(r => (r.Value.IsSuccessStatusCode, r.Elapsed)).ToList();
 
         var finalProduct = await client.GetProductAsync(product.Id);
         var transactions = await client.GetTransactionsAsync(product.Id);
-        CsvExport.Write("B", schemaName, finalProduct, transactions);
+        CsvExport.Write("B", schemaName, finalProduct, transactions, requestStats);
 
         // 悲觀鎖下請求在 DB 排隊序列化：
         //   - Quantity >= 0（庫存永不為負）
