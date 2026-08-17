@@ -20,12 +20,13 @@ public class ScenarioATests
 
         var product = await client.CreateProductAsync($"CT-A-{DateTime.UtcNow:HHmmssfff}", "情境 A 測試商品", InitialQuantity);
 
-        var responses = await ConcurrentBurst.RunAsync(RequestCount, _ => client.StockOutAsync(product.Id, 1));
-        var successCount = responses.Count(r => r.IsSuccessStatusCode);
+        var results = await ConcurrentBurst.RunAsync(RequestCount, _ => client.StockOutAsync(product.Id, 1));
+        var successCount = results.Count(r => r.Value.IsSuccessStatusCode);
+        var requestStats = results.Select(r => (r.Value.IsSuccessStatusCode, r.Elapsed)).ToList();
 
         var finalProduct = await client.GetProductAsync(product.Id);
         var transactions = await client.GetTransactionsAsync(product.Id);
-        CsvExport.Write("A", schemaName, finalProduct, transactions);
+        CsvExport.Write("A", schemaName, finalProduct, transactions, requestStats);
         var hasDuplicateBalance = transactions.GroupBy(t => t.BalanceAfter).Any(g => g.Count() > 1);
 
         var isClean = finalProduct.Quantity == InitialQuantity - successCount
