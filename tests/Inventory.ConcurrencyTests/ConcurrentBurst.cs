@@ -1,4 +1,8 @@
+using System.Diagnostics;
+
 namespace Inventory.ConcurrencyTests;
+
+public record RequestResult<T>(T Value, TimeSpan Elapsed);
 
 // Same async-gate release approach as Inventory.LoadTestClient's
 // ConcurrentDispatcher (see that file for why a blocking Barrier is wrong
@@ -8,11 +12,11 @@ namespace Inventory.ConcurrencyTests;
 // the console client.
 public static class ConcurrentBurst
 {
-    public static async Task<List<T>> RunAsync<T>(int count, Func<int, Task<T>> action)
+    public static async Task<List<RequestResult<T>>> RunAsync<T>(int count, Func<int, Task<T>> action)
     {
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var readyCount = 0;
-        var tasks = new Task<T>[count];
+        var tasks = new Task<RequestResult<T>>[count];
 
         for (var i = 0; i < count; i++)
         {
@@ -22,17 +26,19 @@ public static class ConcurrentBurst
                 if (Interlocked.Increment(ref readyCount) == count)
                     gate.TrySetResult();
                 await gate.Task;
-                return await action(index);
+                var sw = Stopwatch.StartNew();
+                var result = await action(index);
+                return new RequestResult<T>(result, sw.Elapsed);
             });
         }
 
         return (await Task.WhenAll(tasks)).ToList();
     }
 
-    public static async Task<List<T>> RunSustainedAsync<T>(TimeSpan duration, int concurrency, Func<Task<T>> action)
+    public static async Task<List<RequestResult<T>>> RunSustainedAsync<T>(TimeSpan duration, int concurrency, Func<Task<T>> action)
     {
         using var semaphore = new SemaphoreSlim(concurrency);
-        var results = new List<T>();
+        var results = new List<RequestResult<T>>();
         var resultsLock = new object();
         var inFlight = new List<Task>();
         var stopAt = DateTime.UtcNow + duration;
@@ -44,8 +50,10 @@ public static class ConcurrentBurst
             {
                 try
                 {
+                    var sw = Stopwatch.StartNew();
                     var result = await action();
-                    lock (resultsLock) results.Add(result);
+                    var elapsed = sw.Elapsed;
+                    lock (resultsLock) results.Add(new RequestResult<T>(result, elapsed));
                 }
                 finally
                 {
