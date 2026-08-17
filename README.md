@@ -1,6 +1,6 @@
 # 高併發庫存系統——並發控制機制實驗
 
-以庫存扣減為場景，依序實作並測量六種並發控制機制，用同一套測試情境對照正確性與吞吐量的取捨。
+以庫存扣減為場景，在七個分支上實作五種並發控制機制（Redis 分散式鎖含三個 timeout 變體），用同一套測試情境對照正確性與吞吐量的取捨。
 
 ---
 
@@ -100,60 +100,158 @@ END \$\$;"
 
 ---
 
-## 分支與實測結果
+## 各分支與 master 的實作差異
 
-### 情境 A — 暴衝 1000 req，初始庫存 1000
+所有分支都以 `master` 為基礎，只修改最小範圍的生產程式碼。測試執行邏輯與並發基礎設施共用；斷言方向在各 feature 分支反轉——`master` 斷言「弄髒了才算通過」，feature 分支斷言「正確才算通過」。
 
-| 分支 | successCount | 說明 |
-|------|-------------|------|
-| `master`（無鎖）| ~900+（資料損毀）| Lost update，version 遠小於成功數 |
-| `feature/optimistic-lock` | **1** | 衝突立即 409，無重試 |
-| `feature/serializable-isolation` | **39** | SSI abort，吞吐量低於悲觀鎖 |
-| `feature/distributed-lock`（0ms）| **1** | 立即放棄，等同樂觀鎖 |
-| `feature/distributed-lock-retry`（500ms）| **24** | Redis 層排隊 |
-| `feature/distributed-lock-retry-5s`（5s）| **946** | 足夠長的等待讓大多數成功 |
-| `feature/pessimistic-lock` | **1,000** | DB 層排隊，全部成功 |
-| `feature/queue-based-serialization` | **1,000** | in-process Channel，零競爭 |
+### `master` — 控制組（無鎖）
 
-### 情境 B — 暴衝 1000 req，初始庫存 100
+`InventoryService.StockOutAsync` 的核心邏輯：
 
-| 分支 | successCount | finalQuantity |
-|------|-------------|--------------|
-| `master`（無鎖）| ~200+（含負庫存）| < 0（規則失守）|
-| `feature/optimistic-lock` | **19** | 81 |
-| `feature/distributed-lock`（0ms）| **2** | 98 |
-| `feature/serializable-isolation` | **47** | 53 |
-| `feature/distributed-lock-retry`（500ms）| **77** | 23 |
-| `feature/pessimistic-lock` | **100**（滿）| **0** |
-| `feature/distributed-lock-retry-5s`（5s）| **100**（滿）| **0** |
-| `feature/queue-based-serialization` | **100**（滿）| **0** |
+```csharp
+var product = await productRepository.GetByIdAsync(productId);
+product.Quantity -= request.Quantity;   // 記憶體內修改
+await productRepository.SaveChangesAsync();  // 寫回，無版本檢查
+```
 
-### 情境 C — 5 秒持續壓力，50 並發，混合進出
-
-| 分支 | 交易筆數 | 對帳 |
-|------|---------|------|
-| `master`（無鎖）| 高（對帳不符）| ❌ |
-| `feature/optimistic-lock` | **179** | ✓ |
-| `feature/serializable-isolation` | **235** | ✓ |
-| `feature/distributed-lock`（0ms）| **338** | ✓ |
-| `feature/pessimistic-lock` | **604** | ✓ |
-| `feature/distributed-lock-retry`（500ms）| **1,343** | ✓ |
-| `feature/distributed-lock-retry-5s`（5s）| **1,461** | ✓ |
-| `feature/queue-based-serialization` | **2,010** | ✓ |
+read → modify in memory → write，三步之間沒有任何保護。多個請求同時執行時，後寫的會覆蓋先寫的（lost update）。
 
 ---
 
-## 機制特性對比
+### `feature/optimistic-lock` — 樂觀鎖
 
-| 機制 | 暴衝吞吐量 | 持續吞吐量 | 多伺服器 | DB 連線壓力 | 額外依賴 | 客戶端需 retry |
-|------|-----------|-----------|---------|------------|---------|---------------|
-| 樂觀鎖 | 極低 | 低 | ✓ | 低 | 無 | 需要 |
-| Serializable | 低 | 低-中 | ✓ | 中 | 無 | 需要 |
-| 悲觀鎖 | 高 | 中 | ✓ | **高** | 無 | 不需要 |
-| Redis（0ms）| 極低 | 低 | ✓ | 低 | Redis | 需要 |
-| Redis（500ms）| 低 | 中 | ✓ | 低 | Redis | 需要 |
-| Redis（5s）| 高 | 中-高 | ✓ | 低 | Redis | 少量 |
-| Queue | **最高** | **最高** | **❌ 單機** | 低 | 無 | 不需要 |
+**改動：** 只加一個 try-catch，不動 SQL。
+
+```csharp
+try
+{
+    await productRepository.SaveChangesAsync();
+    // EF Core 生成：UPDATE "Product" ... WHERE "Id"=@id AND "Version"=@old
+    // 若另一個請求已先更新，Version 不符，影響 0 行 → DbUpdateConcurrencyException
+}
+catch (DbUpdateConcurrencyException)
+{
+    throw new OptimisticConcurrencyException();  // → 409 Conflict
+}
+```
+
+`Version` 欄位標記 `[ConcurrencyCheck]`，EF 自動在 UPDATE 的 WHERE 加版本條件。衝突由資料庫偵測，應用層拋 409，客戶端決定是否重試。
+
+---
+
+### `feature/pessimistic-lock` — 悲觀鎖
+
+**改動：** 開交易 + 改用 `SELECT ... FOR UPDATE` 讀取。
+
+```csharp
+await using var tx = await productRepository.BeginTransactionAsync();
+var product = await productRepository.GetByIdForUpdateAsync(productId);
+// 此列被鎖住，其他請求在 GetByIdForUpdateAsync 這行阻塞，直到 tx.CommitAsync()
+product.Quantity -= request.Quantity;
+await productRepository.SaveChangesAsync();
+await tx.CommitAsync();
+```
+
+等待發生在資料庫內，等待期間持有 DB 連線。不需要客戶端重試。
+
+---
+
+### `feature/serializable-isolation` — Serializable 隔離層級
+
+**改動：** 開 Serializable 交易，捕捉 PostgreSQL SQLSTATE 40001。
+
+```csharp
+await using var tx = await productRepository.BeginTransactionAsync(IsolationLevel.Serializable);
+try
+{
+    var product = await productRepository.GetByIdAsync(productId);  // 普通 SELECT，不加鎖
+    product.Quantity -= request.Quantity;
+    await productRepository.SaveChangesAsync();
+    await tx.CommitAsync();
+}
+catch (Exception ex) when (IsSerializationFailure(ex))  // SQLSTATE 40001
+{
+    throw new SerializationFailureException();  // → 409
+}
+```
+
+不寫任何鎖語法，由 PostgreSQL SSI（Serializable Snapshot Isolation）自動偵測衝突並中止交易。代價是存在誤殺（false abort）——本來不衝突的交易在高爭用下也可能被中止。
+
+---
+
+### `feature/distributed-lock` — Redis 分散式鎖（0ms 等待）
+
+**新增檔案：** `Locking/IDistributedLockFactory.cs`、`Locking/RedisDistributedLockFactory.cs`
+
+**改動：** 在 read 之前先向 Redis 取鎖。
+
+```csharp
+await using var lock_ = await AcquireLockAsync(productId);
+// SET inventory:lock:{id} {token} NX PX 10000
+// 若 key 已存在 → 立即 throw LockAcquisitionFailedException → 409
+
+var product = await productRepository.GetByIdAsync(productId);
+product.Quantity -= request.Quantity;
+await productRepository.SaveChangesAsync();
+// lock_ Dispose 時執行 Lua 腳本釋放鎖（token 一致才刪）
+```
+
+等待在 Redis，不佔 DB 連線。0ms 版本取不到鎖就立即失敗，客戶端必須自行重試。
+
+---
+
+### `feature/distributed-lock-retry` / `feature/distributed-lock-retry-5s` — Redis 鎖加等待
+
+與 `feature/distributed-lock` 相同，只改 `TryAcquireAsync` 的第三個參數：
+
+```csharp
+// distributed-lock-retry：等最多 500ms
+await lockFactory.TryAcquireAsync(key, LockExpiry, TimeSpan.FromMilliseconds(500));
+
+// distributed-lock-retry-5s：等最多 5s
+await lockFactory.TryAcquireAsync(key, LockExpiry, TimeSpan.FromSeconds(5));
+```
+
+等待期間在 Redis 輪詢，到期才失敗。timeout 越長，成功率越高，但 P99 延遲也越高。
+
+---
+
+### `feature/queue-based-serialization` — Channel 單寫者佇列
+
+**新增檔案：** `Queue/InventoryChannel.cs`、`Queue/InventoryQueueWorker.cs`、`Queue/StockWorkItem.cs`、`Services/QueuedInventoryService.cs`
+
+**機制：** `InventoryService` 本身不動（仍是無鎖的 read-modify-write），但把它包在單一消費者的 `Channel<T>` 後面，讓所有請求序列化執行。
+
+```csharp
+// QueuedInventoryService（HTTP handler 呼叫這個）
+public Task<StockChangeResponse> StockOutAsync(Guid productId, StockChangeRequest request)
+{
+    var tcs = new TaskCompletionSource<StockChangeResponse>();
+    await channel.Writer.WriteAsync(new StockWorkItem(svc => svc.StockOutAsync(...), tcs));
+    return await tcs.Task;  // 等 worker 執行完才回傳
+}
+
+// InventoryQueueWorker（BackgroundService，SingleReader）
+await foreach (var item in channel.Reader.ReadAllAsync(ct))
+{
+    var result = await item.Work(inventoryService);  // 一次只跑一筆
+    item.Completion.SetResult(result);
+}
+```
+
+等待在 process 記憶體（`await tcs.Task`），沒有網路往返、沒有輪詢間隔，吞吐量最高。但 `Channel<T>` 是 in-process 的，無法跨多台 server 共享。
+
+---
+
+## 分支與實測結果
+
+完整的 successCount / P50 / P99 / minSuccessLatencyMs 數字見 [docs/conclusions-comparison.md](docs/conclusions-comparison.md)。
+
+**情境 A（1000 並發暴衝，初始庫存 1000）：** 丟棄型機制（樂觀鎖、Redis 0ms）successCount = 1；排隊型（悲觀鎖、Queue）= 1,000。Redis timeout 從 0ms 調到 5s，成功數從 1 增至 947，代價是 P99 從 127ms 升至 5,056ms。
+
+**情境 B（1000 並發暴衝，初始庫存 100）：** 控制組成功 241 筆，超出初始庫存 141 筆，確認 race condition。悲觀鎖、Redis 5s、Queue 精確成功 100 筆。Serializable Isolation 因誤殺（false abort）僅達 47 筆。
+
+**情境 C（5 秒持續壓力，50 並發）：** Queue 成功率 90.2% 最高且 P99 最穩（186ms）。Redis 0ms 在 5 秒送出 46,602 筆，快速失敗讓 totalRequests 暴增，但成功率僅 0.7%。控制組對帳不符，其餘機制均對帳一致。
 
 ---
 
@@ -161,21 +259,24 @@ END \$\$;"
 
 **吞吐量上限由臨界區決定，不由鎖機制決定**
 
+各機制最快成功請求的端到端延遲約落在 5–18ms，代表一筆請求佔用共享資源的最短時間：
+
 ```
 最大 TPS（單一商品）= 1 / 臨界區執行時間 ≈ 1 / 5ms = 200 TPS
 ```
 
-Redis 再快、Queue 再輕，都無法突破這個上限。差別只在排隊開銷放在哪裡。
+Redis 再快、Queue 再輕，都無法突破這個上限。差別只在排隊等待的位置：DB 連線（悲觀鎖）、Redis 記憶體（分散式鎖）、process 記憶體（Queue）。
 
-**悲觀鎖 vs Redis vs Queue 的本質差異**
+**丟棄 vs 排隊決定了成功率，不是機制種類**
 
-- 悲觀鎖：等待佔 DB 連線，連線池是瓶頸
-- Redis 分散式鎖：等待在 Redis 記憶體，DB 連線只在持鎖後才取出
-- Queue（Channel）：等待在 process 記憶體，零網路往返，吞吐量最高但只能單機
+- 丟棄型（樂觀鎖、Serializable、Redis 0ms）：衝突立即失敗，低延遲，需客戶端重試
+- 排隊型（悲觀鎖、Redis 5s、Queue）：衝突等待，高成功率，無需客戶端重試
 
-**Redis timeout 是唯一可以不改架構就調整吞吐量與延遲的參數**
+**Redis timeout 是不改架構就能調整成功率與延遲的唯一旋鈕**
 
-timeout 越長 → 更多請求成功，但 P99 延遲越高。
+情境 A 成功數：1（0ms）→ 39（500ms）→ 947（5s）。
+
+詳細機制取捨分析與選擇建議見 [docs/conclusions-comparison.md](docs/conclusions-comparison.md)。
 
 ---
 
