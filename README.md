@@ -25,25 +25,20 @@
 ### 環境需求
 
 - .NET 9 SDK
-- PostgreSQL（本機或遠端）
-- Redis（僅 `feature/distributed-lock*` 分支需要）
+- Docker（PostgreSQL 18 與 Redis 均以容器運行）
 
 ### 初始設定
 
 ```bash
-# 建立資料庫使用者與資料庫
-sudo -u postgres psql -c "CREATE ROLE inventory_app LOGIN PASSWORD 'YOUR_PASSWORD';"
-sudo -u postgres psql -c "CREATE DATABASE inventory_dev OWNER inventory_app;"
-
-# 設定連線字串（user-secrets，不進版控）
-cd src/Inventory.Api
-dotnet user-secrets set "ConnectionStrings:Default" \
-  "Host=localhost;Port=5432;Database=inventory_dev;Username=inventory_app;Password=YOUR_PASSWORD;Maximum Pool Size=60"
-
-# 執行 migration
-dotnet ef database update
-cd ../..
+cp .env.example .env        # 可視需要修改帳密
+docker compose up -d        # 啟動 PostgreSQL 18（port 5434）與 Redis（port 6381）
 ```
+
+API 啟動時會自動執行 EF migration，不需要手動跑 `dotnet ef database update`。
+
+連線設定已寫在 `appsettings.Development.json`：
+- PostgreSQL：`Host=localhost;Port=5434;Database=inventory_dev;Username=inventory_app;Password=dev_password`
+- Redis：`localhost:6381`
 
 > `Maximum Pool Size=60` 是刻意設定——沒有這個上限，1000 並發測試會耗盡 PostgreSQL 預設的 `max_connections=100`，產生大量 500 錯誤，污染測試訊號。
 
@@ -56,7 +51,7 @@ dotnet run --project src/Inventory.Api --urls http://localhost:5279
 
 ### 執行並發測試
 
-測試使用 `WebApplicationFactory` 在 process 內啟動 API，不需要手動啟動 server，但需要 PostgreSQL 運行中。
+測試使用 `WebApplicationFactory` 在 process 內啟動 API，不需要手動啟動 server，但需要 Docker containers 運行中（`docker compose up -d`）。
 
 ```bash
 # 執行全部三個情境
@@ -72,10 +67,12 @@ dotnet test tests/Inventory.ConcurrencyTests --filter "FullyQualifiedName~Scenar
 
 ### 清理測試殘留 schema
 
-測試完不會自動刪除 schema（保留供人工查閱）：
+Docker PostgreSQL 無持久化，`docker compose down` 後所有 `test_*` schema 隨容器消失，無需手動清除。
+
+若需在容器運行中手動清理：
 
 ```bash
-PGPASSWORD=YOUR_PASSWORD psql -h localhost -U inventory_app -d inventory_dev -c "
+PGPASSWORD=dev_password psql -h localhost -p 5434 -U inventory_app -d inventory_dev -c "
 DO \$\$
 DECLARE r RECORD;
 BEGIN
@@ -245,13 +242,13 @@ await foreach (var item in channel.Reader.ReadAllAsync(ct))
 
 ## 分支與實測結果
 
-完整的 successCount / P50 / P99 / minSuccessLatencyMs 數字見 [docs/conclusions-comparison.md](docs/conclusions-comparison.md)。
+完整的 successCount / P50 / P99 / minSuccessLatencyMs 數字見 [docs/conclusions-comparison-docker.md](docs/conclusions-comparison-docker.md)（Docker / PG18 環境）。
 
-**情境 A（1000 並發暴衝，初始庫存 1000）：** 丟棄型機制（樂觀鎖、Redis 0ms）successCount = 1；排隊型（悲觀鎖、Queue）= 1,000。Redis timeout 從 0ms 調到 5s，成功數從 1 增至 947，代價是 P99 從 127ms 升至 5,056ms。
+**情境 A（1000 並發暴衝，初始庫存 1000）：** 丟棄型機制（樂觀鎖、Redis 0ms）successCount = 1；排隊型（悲觀鎖、Queue）= 1,000。Redis timeout 從 0ms 調到 5s，成功數從 1 增至 926，代價是 P99 從 137ms 升至 5,071ms。
 
-**情境 B（1000 並發暴衝，初始庫存 100）：** 控制組成功 241 筆，超出初始庫存 141 筆，確認 race condition。悲觀鎖、Redis 5s、Queue 精確成功 100 筆。Serializable Isolation 因誤殺（false abort）僅達 47 筆。
+**情境 B（1000 並發暴衝，初始庫存 100）：** 控制組成功 150 筆，超出初始庫存 50 筆，確認 race condition。Redis 5s、Queue 精確成功 100 筆。Serializable Isolation 因誤殺（false abort）僅達 33 筆。
 
-**情境 C（5 秒持續壓力，50 並發）：** Queue 成功率 90.2% 最高且 P99 最穩（186ms）。Redis 0ms 在 5 秒送出 46,602 筆，快速失敗讓 totalRequests 暴增，但成功率僅 0.7%。控制組對帳不符，其餘機制均對帳一致。
+**情境 C（5 秒持續壓力，50 並發）：** Queue 成功率 90.4% 最高且 P99 最穩（150ms）。Redis 0ms 在 5 秒送出 44,429 筆，快速失敗讓 totalRequests 暴增，但成功率僅 0.7%。控制組對帳不符，其餘機制均對帳一致。
 
 ---
 
@@ -274,7 +271,7 @@ Redis 再快、Queue 再輕，都無法突破這個上限。差別只在排隊�
 
 **Redis timeout 是不改架構就能調整成功率與延遲的唯一旋鈕**
 
-情境 A 成功數：1（0ms）→ 39（500ms）→ 947（5s）。
+情境 A 成功數：1（0ms）→ 42（500ms）→ 926（5s）。
 
 詳細機制取捨分析與選擇建議見 [docs/conclusions-comparison.md](docs/conclusions-comparison.md)。
 
@@ -288,7 +285,8 @@ Redis 再快、Queue 再輕，都無法突破這個上限。差別只在排隊�
 | [docs/db-schema.md](docs/db-schema.md) | `Product`、`InventoryTransaction` 欄位定義 |
 | [docs/test-plan.md](docs/test-plan.md) | 三個測試情境的詳細步驟、判定標準、自動化測試設計 |
 | [docs/operations.md](docs/operations.md) | 啟動 API、執行測試、清理 schema 的實際指令 |
-| [docs/conclusions-comparison.md](docs/conclusions-comparison.md) | 所有機制結果總表與選擇建議 |
+| [docs/conclusions-comparison-docker.md](docs/conclusions-comparison-docker.md) | 所有機制結果總表與選擇建議（Docker / PG18 環境） |
+| [docs/conclusions-comparison.md](docs/conclusions-comparison.md) | 所有機制結果總表與選擇建議（本機 PG17 環境，歷史參考） |
 | [docs/conclusions-optimistic-lock.md](docs/conclusions-optimistic-lock.md) | 樂觀鎖實驗結論 |
 | [docs/conclusions-pessimistic-lock.md](docs/conclusions-pessimistic-lock.md) | 悲觀鎖實驗結論 |
 | [docs/conclusions-serializable-isolation.md](docs/conclusions-serializable-isolation.md) | Serializable Isolation 實驗結論 |
