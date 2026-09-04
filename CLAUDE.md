@@ -10,18 +10,18 @@ Do not add locking to `InventoryService` on `master` — the race condition is t
 
 ## Commands
 
-### First-time setup (real PostgreSQL required)
+### First-time setup
 
 ```bash
-sudo -u postgres psql -c "CREATE ROLE inventory_app LOGIN PASSWORD 'YOUR_PASSWORD';"
-sudo -u postgres psql -c "CREATE DATABASE inventory_dev OWNER inventory_app;"
-
-cd src/Inventory.Api
-dotnet user-secrets set "ConnectionStrings:Default" \
-  "Host=localhost;Port=5432;Database=inventory_dev;Username=inventory_app;Password=YOUR_PASSWORD;Maximum Pool Size=60"
-dotnet ef database update
-cd ../..
+cp .env.example .env        # 可視需要修改帳密
+docker compose up -d        # 啟動 PostgreSQL 18（port 5434）與 Redis（port 6381）
 ```
+
+API 啟動時會自動執行 EF migration，無需手動跑 `dotnet ef database update`。
+
+連線設定已寫在 `appsettings.Development.json`，預設值：
+- PostgreSQL：`Host=localhost;Port=5434;Database=inventory_dev;Username=inventory_app;Password=dev_password`
+- Redis：`localhost:6381`
 
 > `Maximum Pool Size=60` is intentional — without it, 1000-concurrent tests exhaust PostgreSQL's default `max_connections=100` and produce 500 errors that pollute the concurrency signal.
 
@@ -34,7 +34,7 @@ dotnet run --project src/Inventory.Api --urls http://localhost:5279
 
 ### Run concurrency tests (xUnit integration tests)
 
-The tests start the API in-process via `WebApplicationFactory` — no manual server needed. PostgreSQL must be running.
+The tests start the API in-process via `WebApplicationFactory` — no manual server needed. Docker containers must be running (`docker compose up -d`).
 
 ```bash
 # All three scenarios
@@ -66,12 +66,16 @@ dotnet ef database update --project src/Inventory.Api
 
 ### Clean up leftover test schemas
 
+Docker PostgreSQL 無持久化，`docker compose down` 後所有 `test_*` schema 隨容器一併消失，無需手動清除。
+
+若需在容器運行中手動清理：
+
 ```bash
-PGPASSWORD=YOUR_PASSWORD psql -h localhost -U inventory_app -d inventory_dev \
+PGPASSWORD=dev_password psql -h localhost -p 5434 -U inventory_app -d inventory_dev \
   -c "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'test_%' ORDER BY nspname;"
 
 # Drop all test schemas
-PGPASSWORD=YOUR_PASSWORD psql -h localhost -U inventory_app -d inventory_dev -c "
+PGPASSWORD=dev_password psql -h localhost -p 5434 -U inventory_app -d inventory_dev -c "
 DO \$\$
 DECLARE r RECORD;
 BEGIN
