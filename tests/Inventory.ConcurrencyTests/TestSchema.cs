@@ -78,8 +78,7 @@ public static class TestSchema
     private static string BuildBaseConnectionString()
     {
         var apiAssembly = typeof(Program).Assembly;
-        var apiProjectDirectory = Path.GetFullPath(
-            Path.Combine(Path.GetDirectoryName(apiAssembly.Location)!, "..", "..", ".."));
+        var apiProjectDirectory = FindApiProjectDirectory();
 
         var configuration = new ConfigurationBuilder()
             .SetBasePath(apiProjectDirectory)
@@ -91,5 +90,17 @@ public static class TestSchema
 
         return configuration.GetConnectionString("Default")
             ?? throw new InvalidOperationException("找不到 ConnectionStrings:Default,請確認 appsettings/user-secrets 是否已設定");
+    }
+
+    private static string FindApiProjectDirectory()
+    {
+        var dir = AppDomain.CurrentDomain.BaseDirectory;
+        while (dir != null)
+        {
+            var candidate = Path.Combine(dir, "src", "Inventory.Api");
+            if (Directory.Exists(candidate)) return candidate;
+            dir = Path.GetDirectoryName(dir);
+        }
+        throw new DirectoryNotFoundException("找不到 src/Inventory.Api 目錄");
     }
 }
