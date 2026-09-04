@@ -7,14 +7,11 @@
 ## 前置準備(只需做一次)
 
 ```bash
-sudo -u postgres psql -c "CREATE ROLE inventory_app LOGIN PASSWORD '你自訂的密碼';"
-sudo -u postgres psql -c "CREATE DATABASE inventory_dev OWNER inventory_app;"
-
-cd src/Inventory.Api
-dotnet user-secrets set "ConnectionStrings:Default" "Host=localhost;Port=5432;Database=inventory_dev;Username=inventory_app;Password=你剛設的密碼;Maximum Pool Size=60"
-dotnet ef database update
-cd ../..
+cp .env.example .env        # 可視需要修改帳密
+docker compose up -d        # 啟動 PostgreSQL 18（port 5434）與 Redis（port 6381）
 ```
+
+API 啟動時會自動執行 EF migration，不需要手動跑 `dotnet ef database update`。
 
 > `Maximum Pool Size=60` 是刻意設定的,不要拿掉——沒設上限的話,情境 A/B 打 1000 併發會把 PostgreSQL 預設 `max_connections=100` 打爆,炸出一堆跟 lost update 無關的 500 錯誤,把測試訊號弄髒。
 
@@ -72,7 +69,7 @@ dotnet test tests/Inventory.ConcurrencyTests --filter "FullyQualifiedName~Scenar
 dotnet test tests/Inventory.ConcurrencyTests --logger "console;verbosity=detailed"
 ```
 
-這個測試專案**不需要**先手動啟動 API——`WebApplicationFactory` 會自己用 in-process 方式啟動一份。但 PostgreSQL 本身要有在跑(見前置準備)。
+這個測試專案**不需要**先手動啟動 API——`WebApplicationFactory` 會自己用 in-process 方式啟動一份。但 Docker containers 要有在跑（`docker compose up -d`，見前置準備）。
 
 > 不要同時手動跑 `Inventory.LoadTestClient` 又跑 `dotnet test`——兩邊各自有自己的 Npgsql 連線池,同時打會一起逼近 PostgreSQL 的 `max_connections`。一次只跑一種。
 
@@ -87,19 +84,21 @@ dotnet test tests/Inventory.ConcurrencyTests --logger "console;verbosity=detaile
 
 ## 3. 刪除測試 schema
 
-`Inventory.ConcurrencyTests` 每次執行都會留下一個 `test_<時間戳>_<亂數>` schema(刻意不砍,方便事後人工查資料,見 [測試計畫](test-plan.md))。跑久了要清掉時:
+Docker PostgreSQL 無持久化，`docker compose down` 後所有 `test_*` schema 隨容器消失，無需手動清除。
+
+若需在容器運行中手動清理:
 
 ```bash
 # 列出目前所有測試 schema
-PGPASSWORD=你的密碼 psql -h localhost -p 5432 -U inventory_app -d inventory_dev \
+PGPASSWORD=dev_password psql -h localhost -p 5434 -U inventory_app -d inventory_dev \
   -c "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'test_%' ORDER BY nspname;"
 
 # 刪除單一 schema(把 <schema_name> 換成實際名稱)
-PGPASSWORD=你的密碼 psql -h localhost -p 5432 -U inventory_app -d inventory_dev \
+PGPASSWORD=dev_password psql -h localhost -p 5434 -U inventory_app -d inventory_dev \
   -c "DROP SCHEMA \"<schema_name>\" CASCADE;"
 
 # 一次刪掉全部測試 schema
-PGPASSWORD=你的密碼 psql -h localhost -p 5432 -U inventory_app -d inventory_dev -c "
+PGPASSWORD=dev_password psql -h localhost -p 5434 -U inventory_app -d inventory_dev -c "
 DO \$\$
 DECLARE
   r RECORD;
