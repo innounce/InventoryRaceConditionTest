@@ -13,3 +13,6 @@ Thumbs.db
 
 # local env
 .env
+
+# docker export
+*.tar.gz
