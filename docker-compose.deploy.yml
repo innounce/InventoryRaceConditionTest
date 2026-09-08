@@ -1,0 +1,28 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: inventory-postgres
+    ports: ["5434:5432"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-inventory_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_password}
+      POSTGRES_DB: inventory_dev
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: inventory-redis
+    ports: ["6381:6379"]
+    restart: unless-stopped
+
+  api:
+    image: inventory-api:latest
+    ports: ["5279:8080"]
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Default: "Host=postgres;Port=5432;Database=inventory_dev;Username=${POSTGRES_USER:-inventory_app};Password=${POSTGRES_PASSWORD:-dev_password};Maximum Pool Size=60"
+      ConnectionStrings__Redis: "redis:6379"
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped

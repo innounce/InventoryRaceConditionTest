@@ -20,6 +20,20 @@
 
 ---
 
+## 三個元件的定位
+
+| 元件 | 定位 | 部署 |
+|------|------|------|
+| **Inventory.Api** | 唯一的服務本體，提供 HTTP 端點 | 需要部署 |
+| **Inventory.LoadTestClient** | 手動壓測工具，打並發流量、看數字，不判斷對錯 | 打包成執行檔 |
+| **Inventory.ConcurrencyTests** | 自動化測試套件，自己起 API、自動斷言 Pass/Fail | 僅開發 / CI 使用 |
+
+詳細說明見 [docs/docker-qa.md](docs/docker-qa.md)。
+
+完整部署指令見 [docs/deployment.md](docs/deployment.md)。
+
+---
+
 ## 快速開始
 
 ### 環境需求
@@ -45,11 +59,13 @@ API 啟動時會自動執行 EF migration，不需要手動跑 `dotnet ef databa
 ### 啟動 API
 
 ```bash
-dotnet run --project src/Inventory.Api --urls http://localhost:5279
-# Swagger: http://localhost:5279/swagger
+docker compose up -d        # 啟動 postgres + redis + api
+# API: http://localhost:5279/swagger
 ```
 
-### 執行並發測試
+跨機器部署、LoadTestClient 打包、切換分支 rebuild 等詳細指令見 [docs/deployment.md](docs/deployment.md)。
+
+### 執行並發測試（xUnit 自動化）
 
 測試使用 `WebApplicationFactory` 在 process 內啟動 API，不需要手動啟動 server，但需要 Docker containers 運行中（`docker compose up -d`）。
 
@@ -281,6 +297,7 @@ Redis 再快、Queue 再輕，都無法突破這個上限。差別只在排隊�
 
 | 文件 | 內容 |
 |------|------|
+| [docs/docker-qa.md](docs/docker-qa.md) | Docker 容器化常見問題與解答 |
 | [docs/api-spec.md](docs/api-spec.md) | 完整 request/response 規格、錯誤格式、狀態碼 |
 | [docs/db-schema.md](docs/db-schema.md) | `Product`、`InventoryTransaction` 欄位定義 |
 | [docs/test-plan.md](docs/test-plan.md) | 三個測試情境的詳細步驟、判定標準、自動化測試設計 |
@@ -292,4 +309,5 @@ Redis 再快、Queue 再輕，都無法突破這個上限。差別只在排隊�
 | [docs/conclusions-serializable-isolation.md](docs/conclusions-serializable-isolation.md) | Serializable Isolation 實驗結論 |
 | [docs/conclusions-distributed-lock.md](docs/conclusions-distributed-lock.md) | Redis 分散式鎖（無等待）實驗結論 |
 | [docs/conclusions-distributed-lock-retry.md](docs/conclusions-distributed-lock-retry.md) | Redis 分散式鎖（500ms 等待）實驗結論 |
+| [docs/conclusions-distributed-lock-retry-5s.md](docs/conclusions-distributed-lock-retry-5s.md) | Redis 分散式鎖（5s 等待）實驗結論 |
 | [docs/conclusions-queue-based-serialization.md](docs/conclusions-queue-based-serialization.md) | Queue 序列化實驗結論 |
